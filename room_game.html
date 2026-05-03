@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>3D 房间游戏</title>
+  <style>
+    body { margin: 0; background: #1a1a2e; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
+    canvas { display: block; border-radius: 12px; }
+    #controls { margin-top: 12px; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+    .row { display: flex; gap: 6px; }
+    button { width: 44px; height: 44px; background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3); border-radius: 8px; color: #fff; font-size: 18px; cursor: pointer; }
+    #tip { position: fixed; top: 12px; left: 12px; color: rgba(255,255,255,0.6); font-size: 13px; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="controls">
+  <div class="row"><button id="btnW">↑</button></div>
+  <div class="row">
+    <button id="btnA">←</button>
+    <button id="btnS">↓</button>
+    <button id="btnD">→</button>
+  </div>
+</div>
+<div id="tip">WASD 或箭头键移动 · 靠近门自动开启</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+
+// ============================================================
+// 1. 基础设置（渲染器、场景、摄像机、灯光）
+// ============================================================
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.setSize(window.innerWidth * 0.95, window.innerHeight * 0.7);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+scene.fog = new THREE.Fog(0x1a1a2e, 14, 26);
+
+const camera = new THREE.PerspectiveCamera(55, renderer.domElement.width / renderer.domElement.height, 0.1, 100);
+camera.position.set(0, 7, 9);
+camera.lookAt(0, 0, 0);
+
+// 环境光（整体亮度）
+scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+
+// 方向光（产生阴影）
+const dirLight = new THREE.DirectionalLight(0xfffbe8, 1.2);
+dirLight.position.set(2, 8, 4);
+dirLight.castShadow = true;
+dirLight.shadow.camera.left = -8;   // 阴影范围，调大房间时需要改
+dirLight.shadow.camera.right = 8;
+dirLight.shadow.camera.top = 8;
+dirLight.shadow.camera.bottom = -8;
+dirLight.shadow.camera.far = 30;
+scene.add(dirLight);
+
+scene.add(new THREE.PointLight(0x6688cc, 0.6, 15));
+
+
+// ============================================================
+// 2. 房间（地板 + 四面墙 + 天花板）
+// ============================================================
+const ROOM = 5; // 房间半径，改这个数字可以让房间变大变小
+
+// 地板
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(ROOM * 2, ROOM * 2),
+  new THREE.MeshLambertMaterial({ color: 0x8B7355 })
+);
+floor.rotation.x = -Math.PI / 2;
+floor.receiveShadow = true;
+scene.add(floor);
+
+// 四面墙（用一个盒子从内部渲染，side: BackSide 表示看内面）
+const walls = new THREE.Mesh(
+  new THREE.BoxGeometry(ROOM * 2, 5, ROOM * 2),
+  new THREE.MeshLambertMaterial({ color: 0xD4C5A9, side: THREE.BackSide })
+);
+walls.position.y = 2.5;
+scene.add(walls);
+
+// 天花板
+const ceil = new THREE.Mesh(
+  new THREE.PlaneGeometry(ROOM * 2, ROOM * 2),
+  new THREE.MeshLambertMaterial({ color: 0xEDE8DC })
+);
+ceil.rotation.x = Math.PI / 2;
+ceil.position.y = 5;
+scene.add(ceil);
+
+// 地板格子线
+const grid = new THREE.GridHelper(ROOM * 2, 10, 0x6B5B45, 0x6B5B45);
+grid.position.y = 0.01;
+grid.material.opacity = 0.3;
+grid.material.transparent = true;
+scene.add(grid);
+
+
+// ============================================================
+// 3. 门（共4扇）
+// ============================================================
+const DOOR_W = 1.6;  // 门宽
+const DOOR_H = 3.2;  // 门高
+const FRONT_Z = -ROOM + 0.05; // 前墙 Z 坐标
+const RIGHT_X = ROOM - 0.05;  // 右墙 X 坐标
+const LEFT_X = -ROOM + 0.05;  // 左墙 X 坐标
+const doors = []; // 存所有门，用于碰撞检测
+
+// 前墙的门（沿 X 轴排列）
+function makeZDoor(xPos, doorColor, panelColor, knobColor) {
+  const frameMat  = new THREE.MeshLambertMaterial({ color: 0x6B4C1E }); // 门框颜色
+  const doorMat   = new THREE.MeshLambertMaterial({ color: doorColor });
+  const panelMat  = new THREE.MeshLambertMaterial({ color: panelColor });
+  const knobMat   = new THREE.MeshLambertMaterial({ color: knobColor });
+
+  // 门框上横梁
+  const fTop = new THREE.Mesh(new THREE.BoxGeometry(DOOR_W + 0.2, 0.14, 0.12), frameMat);
+  fTop.position.set(xPos, DOOR_H + 0.07, FRONT_Z);
+  scene.add(fTop);
+
+  // 门框左右竖梁
+  const fL = new THREE.Mesh(new THREE.BoxGeometry(0.1, DOOR_H, 0.12), frameMat);
+  fL.position.set(xPos - DOOR_W / 2 - 0.05, DOOR_H / 2, FRONT_Z);
+  scene.add(fL);
+
+  const fR = new THREE.Mesh(new THREE.BoxGeometry(0.1, DOOR_H, 0.12), frameMat);
+  fR.position.set(xPos + DOOR_W / 2 + 0.05, DOOR_H / 2, FRONT_Z);
+  scene.add(fR);
+
+  // 铰链（pivot）放在门左边缘，门绕 Y 轴旋转
+  const pivot = new THREE.Group();
+  pivot.position.set(xPos - DOOR_W / 2, 0, FRONT_Z);
+  scene.add(pivot);
+
+  // 门板
+  const dm = new THREE.Mesh(new THREE.BoxGeometry(DOOR_W, DOOR_H, 0.08), doorMat);
+  dm.position.set(DOOR_W / 2, DOOR_H / 2, 0);
+  dm.castShadow = true;
+  pivot.add(dm);
+
+  // 门板装饰面板
+  const pGeo = new THREE.BoxGeometry(DOOR_W * 0.6, DOOR_H * 0.3, 0.1);
+  const p1 = new THREE.Mesh(pGeo, panelMat);
+  p1.position.set(DOOR_W / 2, DOOR_H * 0.72, 0);
+  pivot.add(p1);
+  const p2 = new THREE.Mesh(pGeo, panelMat);
+  p2.position.set(DOOR_W / 2, DOOR_H * 0.38, 0);
+  pivot.add(p2);
+
+  // 门把手
+  const knob = new THREE.Mesh(new THREE.SphereGeometry(0.09, 8, 8), knobMat);
+  knob.position.set(DOOR_W - 0.14, DOOR_H / 2, 0.09);
+  pivot.add(knob);
+
+  // 记录这扇门的信息
+  doors.push({
+    pivot,
+    cx: xPos,         // 门的中心 X
+    cz: FRONT_Z,      // 门的中心 Z
+    angle: 0,         // 当前旋转角度
+    targetAngle: 0,   // 目标旋转角度
+    openAngle: Math.PI / 2  // 完全打开的角度（90度）
+  });
+}
+
+// 左右墙的门（沿 Z 轴排列）
+function makeXDoor(wallX, zPos, doorColor, panelColor, knobColor, openDir) {
+  const frameMat = new THREE.MeshLambertMaterial({ color: 0x6B4C1E });
+  const doorMat  = new THREE.MeshLambertMaterial({ color: doorColor });
+  const panelMat = new THREE.MeshLambertMaterial({ color: panelColor });
+  const knobMat  = new THREE.MeshLambertMaterial({ color: knobColor });
+
+  const fTop = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.14, DOOR_W + 0.2), frameMat);
+  fTop.position.set(wallX, DOOR_H + 0.07, zPos);
+  scene.add(fTop);
+
+  const fF = new THREE.Mesh(new THREE.BoxGeometry(0.12, DOOR_H, 0.1), frameMat);
+  fF.position.set(wallX, DOOR_H / 2, zPos - DOOR_W / 2 - 0.05);
+  scene.add(fF);
+
+  const fB = new THREE.Mesh(new THREE.BoxGeometry(0.12, DOOR_H, 0.1), frameMat);
+  fB.position.set(wallX, DOOR_H / 2, zPos + DOOR_W / 2 + 0.05);
+  scene.add(fB);
+
+  const pivot = new THREE.Group();
+  pivot.position.set(wallX, 0, zPos - DOOR_W / 2);
+  scene.add(pivot);
+
+  const dm = new THREE.Mesh(new THREE.BoxGeometry(0.08, DOOR_H, DOOR_W), doorMat);
+  dm.position.set(0, DOOR_H / 2, DOOR_W / 2);
+  dm.castShadow = true;
+  pivot.add(dm);
+
+  const pGeo = new THREE.BoxGeometry(0.1, DOOR_H * 0.3, DOOR_W * 0.6);
+  const p1 = new THREE.Mesh(pGeo, panelMat);
+  p1.position.set(0, DOOR_H * 0.72, DOOR_W / 2);
+  pivot.add(p1);
+  const p2 = new THREE.Mesh(pGeo, panelMat);
+  p2.position.set(0, DOOR_H * 0.38, DOOR_W / 2);
+  pivot.add(p2);
+
+  const knob = new THREE.Mesh(new THREE.SphereGeometry(0.09, 8, 8), knobMat);
+  knob.position.set(openDir * 0.09, DOOR_H / 2, DOOR_W - 0.14);
+  pivot.add(knob);
+
+  doors.push({
+    pivot,
+    cx: wallX,
+    cz: zPos,
+    angle: 0,
+    targetAngle: 0,
+    openAngle: openDir * Math.PI / 2  // openDir: 1 或 -1 控制开门方向
+  });
+}
+
+// 放置4扇门
+makeZDoor(-2.6, 0xE8B800, 0xCDA000, 0xFFD700); // 前墙左黄门
+makeZDoor( 2.6, 0xE8B800, 0xCDA000, 0xFFD700); // 前墙右黄门
+makeXDoor(RIGHT_X, -2.0, 0x222222, 0x111111, 0x888888, -1); // 右墙黑门
+makeXDoor(LEFT_X,  -0.5, 0xE8B800, 0xCDA000, 0xFFD700,  1); // 左墙黄门
+
+
+// ============================================================
+// 4. 沙发
+// ============================================================
+// cx, cz = 中心位置；rotY = 旋转角度（弧度）
+// rotY = 0          → 靠背朝右（贴右墙）
+// rotY = Math.PI/2  → 靠背朝下（贴后墙，坐垫朝前）
+function makeSofa(cx, cz, rotY) {
+  const g = new THREE.Group();
+  const woodMat  = new THREE.MeshLambertMaterial({ color: 0x8B1A1A }); // 深红木色
+  const darkMat  = new THREE.MeshLambertMaterial({ color: 0x6B1010 }); // 更深红（扶手）
+  const cushMat  = new THREE.MeshLambertMaterial({ color: 0xB22222 }); // 坐垫红色
+  const legMat   = new THREE.MeshLambertMaterial({ color: 0x5C1010 }); // 腿
+
+  const SW = 4.0; // 沙发长度（改这个让沙发更长或更短）
+  const SD = 1.5; // 沙发深度（改这个让沙发更深或更浅）
+  const SH = 0.5; // 底座高度
+
+  // 底座
+  const base = new THREE.Mesh(new THREE.BoxGeometry(SD, SH, SW), woodMat);
+  base.position.set(-SD / 2, SH / 2, 0);
+  base.castShadow = true;
+  base.receiveShadow = true;
+  g.add(base);
+
+  // 坐垫（4段）
+  for (let i = 0; i < 4; i++) {
+    const seat = new THREE.Mesh(new THREE.BoxGeometry(SD * 0.85, 0.28, 0.9), cushMat);
+    seat.position.set(-SD / 2, SH + 0.14, -SW / 2 + 0.5 + i * 1.0);
+    seat.castShadow = true;
+    g.add(seat);
+  }
+
+  // 靠背木框
+  const back = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.9, SW), woodMat);
+  back.position.set(-0.1, SH + 0.45, 0);
+  back.castShadow = true;
+  g.add(back);
+
+  // 靠背软垫
+  const backCush = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.75, SW * 0.95), cushMat);
+  backCush.position.set(-0.25, SH + 0.45, 0);
+  g.add(backCush);
+
+  // 两侧扶手
+  [-SW / 2, SW / 2].forEach(lz => {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(SD + 0.15, 0.7, 0.22), darkMat);
+    arm.position.set(-SD / 2, SH + 0.35, lz);
+    arm.castShadow = true;
+    g.add(arm);
+    const armTop = new THREE.Mesh(new THREE.BoxGeometry(SD + 0.2, 0.12, 0.28), woodMat);
+    armTop.position.set(-SD / 2, SH + 0.71, lz);
+    g.add(armTop);
+  });
+
+  // 四条腿
+  [
+    [-0.12,  SW / 2 - 0.15],
+    [-0.12, -SW / 2 + 0.15],
+    [-SD + 0.12,  SW / 2 - 0.15],
+    [-SD + 0.12, -SW / 2 + 0.15]
+  ].forEach(([lx, lz]) => {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.18, 0.14), legMat);
+    leg.position.set(lx, 0.09, lz);
+    g.add(leg);
+  });
+
+  g.rotation.y = rotY;
+  g.position.set(cx, 0, cz);
+  scene.add(g);
+}
+
+// 放置沙发
+makeSofa(ROOM - 0.08, 2.5, 0);              // 右墙沙发（贴右墙）
+makeSofa(1.0, ROOM - 0.08, Math.PI / 2);    // 后墙沙发（贴后墙）
+
+
+// ============================================================
+// 5. 角色
+// ============================================================
+function makeChar() {
+  const g = new THREE.Group();
+
+  function addPart(geo, color, x, y, z) {
+    const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color }));
+    m.position.set(x, y, z);
+    m.castShadow = true;
+    g.add(m);
+    return m;
+  }
+
+  addPart(new THREE.BoxGeometry(0.5, 0.7, 0.3),  0x4A90D9, 0, 0.95, 0); // 身体
+  addPart(new THREE.BoxGeometry(0.38, 0.38, 0.38), 0xF5C5A3, 0, 1.49, 0); // 头
+  addPart(new THREE.BoxGeometry(0.4, 0.12, 0.4),  0x3B2314, 0, 1.72, 0); // 头发
+
+  // 腿和手臂（需要动画，单独存起来）
+  g._lL = addPart(new THREE.BoxGeometry(0.18, 0.55, 0.18), 0x2C3E6B, -0.14, 0.28, 0);
+  g._lR = addPart(new THREE.BoxGeometry(0.18, 0.55, 0.18), 0x2C3E6B,  0.14, 0.28, 0);
+  g._aL = addPart(new THREE.BoxGeometry(0.15, 0.5, 0.15),  0x4A90D9, -0.35, 0.95, 0);
+  g._aR = addPart(new THREE.BoxGeometry(0.15, 0.5, 0.15),  0x4A90D9,  0.35, 0.95, 0);
+
+  return g;
+}
+
+const char = makeChar();
+scene.add(char);
+
+// 角色脚下阴影圆
+const shadow = new THREE.Mesh(
+  new THREE.CircleGeometry(0.3, 16),
+  new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.2 })
+);
+shadow.rotation.x = -Math.PI / 2;
+shadow.position.y = 0.005;
+scene.add(shadow);
+
+
+// ============================================================
+// 6. 键盘 + 按钮控制
+// ============================================================
+const keys = { w: false, a: false, s: false, d: false };
+
+document.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (k === 'w' || k === 'arrowup')    keys.w = true;
+  if (k === 'a' || k === 'arrowleft')  keys.a = true;
+  if (k === 's' || k === 'arrowdown')  keys.s = true;
+  if (k === 'd' || k === 'arrowright') keys.d = true;
+});
+document.addEventListener('keyup', e => {
+  const k = e.key.toLowerCase();
+  if (k === 'w' || k === 'arrowup')    keys.w = false;
+  if (k === 'a' || k === 'arrowleft')  keys.a = false;
+  if (k === 's' || k === 'arrowdown')  keys.s = false;
+  if (k === 'd' || k === 'arrowright') keys.d = false;
+});
+
+// 手机按钮
+[['btnW','w'],['btnA','a'],['btnS','s'],['btnD','d']].forEach(([id, key]) => {
+  const btn = document.getElementById(id);
+  btn.addEventListener('pointerdown',  () => keys[key] = true);
+  btn.addEventListener('pointerup',    () => keys[key] = false);
+  btn.addEventListener('pointerleave', () => keys[key] = false);
+});
+
+
+// ============================================================
+// 7. 游戏主循环
+// ============================================================
+const SPEED = 0.05;  // 移动速度（改这个让角色快或慢）
+const LIMIT = ROOM - 0.4; // 移动边界（不让角色穿墙）
+let t = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+  t += 0.08;
+
+  // 移动方向
+  let dx = 0, dz = 0;
+  if (keys.w) dz -= SPEED;
+  if (keys.s) dz += SPEED;
+  if (keys.a) dx -= SPEED;
+  if (keys.d) dx += SPEED;
+
+  const moving = dx !== 0 || dz !== 0;
+
+  if (moving) {
+    // 限制在房间内
+    char.position.x = Math.max(-LIMIT, Math.min(LIMIT, char.position.x + dx));
+    char.position.z = Math.max(-LIMIT, Math.min(LIMIT, char.position.z + dz));
+    // 角色转向
+    char.rotation.y = Math.atan2(dx, dz);
+    // 走路动画
+    char._lL.rotation.x =  Math.sin(t) * 0.5;
+    char._lR.rotation.x = -Math.sin(t) * 0.5;
+    char._aL.rotation.x = -Math.sin(t) * 0.4;
+    char._aR.rotation.x =  Math.sin(t) * 0.4;
+  } else {
+    // 停下来慢慢回到原位
+    char._lL.rotation.x *= 0.85;
+    char._lR.rotation.x *= 0.85;
+    char._aL.rotation.x *= 0.85;
+    char._aR.rotation.x *= 0.85;
+  }
+
+  // 阴影跟随角色
+  shadow.position.x = char.position.x;
+  shadow.position.z = char.position.z;
+
+  // 门的开关逻辑（靠近自动开，走远自动关）
+  doors.forEach(door => {
+    const dist = Math.hypot(char.position.x - door.cx, char.position.z - door.cz);
+    door.targetAngle = dist < 2.2 ? door.openAngle : 0; // 2.2 = 触发距离
+    door.angle += (door.targetAngle - door.angle) * 0.08; // 平滑过渡
+    door.pivot.rotation.y = door.angle;
+  });
+
+  // 摄像机跟随角色
+  camera.position.x += (char.position.x * 0.3 - camera.position.x) * 0.05;
+  camera.position.z += (char.position.z * 0.3 + 9 - camera.position.z) * 0.05;
+  camera.lookAt(char.position.x, 1, char.position.z);
+
+  renderer.render(scene, camera);
+}
+
+animate();
+</script>
+</body>
+</html>
